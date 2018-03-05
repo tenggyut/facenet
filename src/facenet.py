@@ -302,7 +302,7 @@ def get_learning_rate_from_file(filename, epoch):
     with open(filename, 'r') as f:
         for line in f.readlines():
             line = line.split('#', 1)[0]
-            if line:
+            if line.strip():
                 par = line.strip().split(':')
                 e = int(par[0])
                 lr = float(par[1])

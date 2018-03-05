@@ -55,14 +55,14 @@ def main(args):
             input_graph_def = sess.graph.as_graph_def()
             
             # Freeze the graph def
-            output_graph_def = freeze_graph_def(sess, input_graph_def, 'embeddings')
+            output_graph_def = freeze_graph_def(sess, args, input_graph_def, 'embeddings')
 
         # Serialize and dump the output graph to the filesystem
         with tf.gfile.GFile(args.output_file, 'wb') as f:
             f.write(output_graph_def.SerializeToString())
         print("%d ops in the final graph: %s" % (len(output_graph_def.node), args.output_file))
         
-def freeze_graph_def(sess, input_graph_def, output_node_names):
+def freeze_graph_def(sess, args, input_graph_def, output_node_names):
     for node in input_graph_def.node:
         if node.op == 'RefSwitch':
             node.op = 'Switch'
@@ -78,10 +78,16 @@ def freeze_graph_def(sess, input_graph_def, output_node_names):
     
     # Get the list of important nodes
     whitelist_names = []
+
     for node in input_graph_def.node:
-        if (node.name.startswith('InceptionResnetV1') or node.name.startswith('embeddings') or 
-                node.name.startswith('phase_train') or node.name.startswith('Bottleneck') or node.name.startswith('Logits')):
-            whitelist_names.append(node.name)
+        if args.loss == 'am':
+            if (node.name.startswith('Resface') or node.name.startswith('embeddings') or 
+                    node.name.startswith('phase_train') or node.name.startswith('Bottleneck') or node.name.startswith('AM_logits')):
+                whitelist_names.append(node.name)
+        else:
+            if (node.name.startswith('InceptionResnetV1') or node.name.startswith('embeddings') or 
+                    node.name.startswith('phase_train') or node.name.startswith('Bottleneck') or node.name.startswith('Logits')):
+                whitelist_names.append(node.name)
 
     # Replace all the variables in the graph with constants of the same values
     output_graph_def = graph_util.convert_variables_to_constants(
@@ -96,6 +102,9 @@ def parse_arguments(argv):
         help='Directory containing the metagraph (.meta) file and the checkpoint (ckpt) file containing model parameters')
     parser.add_argument('output_file', type=str, 
         help='Filename for the exported graphdef protobuf (.pb)')
+    parser.add_argument('loss', type=str, 
+        help='loss type')
+
     return parser.parse_args(argv)
 
 if __name__ == '__main__':
