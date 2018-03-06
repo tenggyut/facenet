@@ -17,6 +17,8 @@ import time
 import codecs
 import itertools
 
+import roc_points
+import datetime
 #path: ${ROOT}/test_type/identity/*.jpg
 
 def get_image_paths(data_dir):
@@ -73,16 +75,12 @@ def load_and_align_data(args, image_paths, image_height, image_width, margin, gp
     end = time.time()
 
     print("抓脸完成，成功抓取 %d, 失败 %d, 耗时 %ds" % (len(img_list), len(failed_paths), (end - start)))
-    with open(os.path.join(args.res_dir, u"抓脸失败.txt"), 'wb') as f:
-        for p in failed_paths:
-            f.write(p)
-            f.write('\n')
 
-    return images, success_paths
+    return images, success_paths, failed_paths
 
 def get_embeddings(args, image_files):
     emb = None
-    images, success_paths = load_and_align_data(args, image_files, args.image_height, args.image_width, args.margin, args.gpu_memory_fraction)
+    images, success_paths, failed_paths = load_and_align_data(args, image_files, args.image_height, args.image_width, args.margin, args.gpu_memory_fraction)
     print(u"开始提取人脸特征， 人脸总数: %d" % len(success_paths))
     start = time.time()
     with tf.Graph().as_default():
@@ -102,7 +100,7 @@ def get_embeddings(args, image_files):
             emb = sess.run(embeddings, feed_dict=feed_dict)
     end = time.time()
     print(u"人脸特征提取结束， 耗时 %ds" % (end - start))
-    return emb, success_paths
+    return emb, success_paths, failed_paths
 
 def compute_diff(embs, image_paths, sample_type):
     diffs = []
@@ -130,24 +128,66 @@ def compute_diff(embs, image_paths, sample_type):
 
     return diffs
 
-def dump_csv(diffs, res_dir):
-    if not os.path.exists(res_dir):
-        os.makedirs(res_dir)
-
-    header = ['左边测试子集', '左边测试对象ID', '左边测试对象图片', '右边测试子集', '右边测试对象ID', '右边测试对象图片', '是否正样本', '相似度']
+def dump_diff_csv(diffs, res_dir, optimal_thres, standard_thres):
+    header = ['左边测试子集', '左边测试对象ID', '左边测试对象图片', '右边测试子集', '右边测试对象ID', '右边测试对象图片', '是否正样本', '原始相似度', '标准化相似度']
     with open(os.path.join(res_dir, "diff_score.csv"), 'wb') as myfile:
         wr = csv.writer(myfile, quoting=csv.QUOTE_ALL)
         wr.writerow(header)
         for d in diffs:
+            if d[-1] >= optimal_thres and d[-1] < standard_thres:
+                d.append(standard_thres)
+            else:
+                d.append(d[-1])
             wr.writerow(d)
+
+def dump_optimal_param(thres, tpr, far, res_dir):
+    optimal_param_file = "optimal_param.txt"
+    with open(os.path.join(res_dir, optimal_param_file), 'wb') as f:
+        f.write('TPR: %.5f\n' % tpr)
+        f.write('FAR: %.5f\n' % far)
+        f.write('Thres: %.5f\n' % thres)
+        f.write('TPR = true_positive / (true_positive + false_negative)\n')
+        f.write('TPR = false_positive / (false_positive + true_negative)\n')
+
+def dump_failed_path(failed_paths, res_dir):
+    with open(os.path.join(res_dir, u"抓脸失败.txt"), 'wb') as f:
+        for p in failed_paths:
+            f.write(p)
+            f.write('\n')
+
+def find_thres(roc_data, far = 0.001):
+    target_tpr = 0.0
+    optimal_thres = 0.0
+    act_far = 0.0
+    for data in roc_data:
+        TPR = float(data[0])
+        FAR = float(data[1])
+        thres = float(data[2])
+        if abs(FAR - far) <= 0.001 and target_tpr < TPR:
+            target_tpr = TPR
+            optimal_thres = thres
+            act_far = FAR
+    return optimal_thres, target_tpr, act_far
 
 def start_test(args):
     image_paths = get_image_paths(args.test_images_dir)
     print("total test image count: %d" % len(image_paths))
-    embeddings, success_paths = get_embeddings(args, image_paths)
+    embeddings, success_paths, failed_paths = get_embeddings(args, image_paths)
     diffs = compute_diff(embeddings, success_paths, args.test_type)
-    print("finish cal diff scores")
-    dump_csv(diffs, args.res_dir)
+    roc_data = roc_points.cal_roc_points(diffs)
+
+    optimal_thres, tpr, far = find_thres(roc_data, args.target_far)
+
+    print("start to dump test result...")
+    act_res_dir = args.res_dir + '/' + datetime.datetime.now().strftime('%Y_%m_%d_%H_%M');
+    if not os.path.exists(act_res_dir):
+        os.makedirs(act_res_dir)
+
+    dump_failed_path(failed_paths, act_res_dir)
+    dump_diff_csv(diffs, act_res_dir, optimal_thres, standard_thres = 0.6)
+    dump_optimal_param(optimal_thres, tpr, far, act_res_dir)
+    roc_points.dump_roc_csv(diffs, act_res_dir)
+
     print("测试完成，结果保存在 %s" % args.res_dir)
 
 def parse_arguments(argv):
@@ -157,6 +197,8 @@ def parse_arguments(argv):
     parser.add_argument('--test_images_dir', type=str, help=u'测试图片根目录路径')
     parser.add_argument('--res_dir', type=str, help=u'测试结果存储目录')
     parser.add_argument('--test_type', type=str, help=u'测试类型: pos or neg', default = 'neg')
+    parser.add_argument('--target_far', type=float,
+        help='base FAR, default 0.008', default=0.008)
     parser.add_argument('--image_height', type=int,
         help='Image size (height, width) in pixels.', default=160)
     parser.add_argument('--image_width', type=int,
